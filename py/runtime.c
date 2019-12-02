@@ -88,6 +88,9 @@ void mp_init(void) {
     #if MICROPY_ENABLE_COMPILER
     // optimization disabled by default
     MP_STATE_VM(mp_optimise_value) = 0;
+    #if MICROPY_EMIT_NATIVE
+    MP_STATE_VM(default_emit_opt) = MP_EMIT_OPT_NONE;
+    #endif
     #endif
 
     // init global module dict
@@ -120,6 +123,16 @@ void mp_init(void) {
 
     #if MICROPY_PY_SYS_ATEXIT
     MP_STATE_VM(sys_exitfunc) = mp_const_none;
+    #endif
+
+    #if MICROPY_PY_SYS_SETTRACE
+    MP_STATE_THREAD(prof_trace_callback) = MP_OBJ_NULL;
+    MP_STATE_THREAD(prof_callback_is_executing) = false;
+    MP_STATE_THREAD(current_code_state) = NULL;
+    #endif
+
+    #if MICROPY_PY_BLUETOOTH
+    MP_STATE_VM(bluetooth) = MP_OBJ_NULL;
     #endif
 
     #if MICROPY_PY_THREAD_GIL
@@ -557,16 +570,17 @@ generic_binary_op:
     }
 
 #if MICROPY_PY_REVERSE_SPECIAL_METHODS
-    if (op >= MP_BINARY_OP_OR && op <= MP_BINARY_OP_REVERSE_POWER) {
+    if (op >= MP_BINARY_OP_OR && op <= MP_BINARY_OP_POWER) {
         mp_obj_t t = rhs;
         rhs = lhs;
         lhs = t;
-        if (op <= MP_BINARY_OP_POWER) {
-            op += MP_BINARY_OP_REVERSE_OR - MP_BINARY_OP_OR;
-            goto generic_binary_op;
-        }
-
+        op += MP_BINARY_OP_REVERSE_OR - MP_BINARY_OP_OR;
+        goto generic_binary_op;
+    } else if (op >= MP_BINARY_OP_REVERSE_OR) {
         // Convert __rop__ back to __op__ for error message
+        mp_obj_t t = rhs;
+        rhs = lhs;
+        lhs = t;
         op -= MP_BINARY_OP_REVERSE_OR - MP_BINARY_OP_OR;
     }
 #endif
@@ -1306,7 +1320,12 @@ mp_vm_return_kind_t mp_resume(mp_obj_t self_in, mp_obj_t send_value, mp_obj_t th
         // will be propagated up. This behavior is approved by test_pep380.py
         // test_delegation_of_close_to_non_generator(),
         //  test_delegating_throw_to_non_generator()
-        *ret_val = mp_make_raise_obj(throw_value);
+        if (mp_obj_exception_match(throw_value, MP_OBJ_FROM_PTR(&mp_type_StopIteration))) {
+            // PEP479: if StopIteration is raised inside a generator it is replaced with RuntimeError
+            *ret_val = mp_obj_new_exception_msg(&mp_type_RuntimeError, "generator raised StopIteration");
+        } else {
+            *ret_val = mp_make_raise_obj(throw_value);
+        }
         return MP_VM_RETURN_EXCEPTION;
     }
 }
@@ -1434,7 +1453,7 @@ mp_obj_t mp_parse_compile_execute(mp_lexer_t *lex, mp_parse_input_kind_t parse_i
     if (nlr_push(&nlr) == 0) {
         qstr source_name = lex->source_name;
         mp_parse_tree_t parse_tree = mp_parse(lex, parse_input_kind);
-        mp_obj_t module_fun = mp_compile(&parse_tree, source_name, MP_EMIT_OPT_NONE, false);
+        mp_obj_t module_fun = mp_compile(&parse_tree, source_name, false);
 
         mp_obj_t ret;
         if (MICROPY_PY_BUILTINS_COMPILE && globals == NULL) {
